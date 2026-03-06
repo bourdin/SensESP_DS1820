@@ -1,3 +1,4 @@
+
 #include <memory>
 
 #include "sensesp/signalk/signalk_output.h"
@@ -10,6 +11,30 @@
 using namespace reactesp;
 using namespace sensesp;
 using namespace sensesp::onewire;
+
+void registerDS1820(DallasTemperatureSensors *dts, uint read_delay, int i){
+  debugI("*** Initializing OneWire sensor %d ***", i);
+  auto tempSensor = new OneWireTemperature(dts, read_delay, String("/tempSensor") + String(i) + String("/oneWire"));
+  ConfigItem(tempSensor)
+    ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" address"))
+    ->set_sort_order(100+10*i);
+
+  auto tempSensorCalibration =
+      new Linear(1.0, 0.0, String("/tempSensor") + String(i) + String("/linear"));
+  ConfigItem(tempSensorCalibration)
+      ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" calibration"))
+      ->set_sort_order(100+10*i+1);
+
+  auto tempSensorSKOutput = new SKOutputFloat(
+        String("environment.temperature") + String(i), String("/tempSensor") + String(i) + String("/skPath"));
+  ConfigItem(tempSensorSKOutput)
+        ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" Signal K Path"))
+        ->set_sort_order(100+10*i+2);
+
+  tempSensor->connect_to(tempSensorCalibration)
+                ->connect_to(tempSensorSKOutput);
+  debugI("*** Initialized OneWire sensor %d ***", i);
+}
 
 void setup() {
   SetupLogging();
@@ -38,7 +63,7 @@ void setup() {
   */
   uint8_t pin = 19;
   // Define how often SensESP should read the sensor(s) in milliseconds
-  uint read_delay = 500;
+  uint read_delay = 10000;
 
   // Counting available sensors
   int numSensors = 0;
@@ -47,37 +72,12 @@ void setup() {
     numSensors++;
   }
   debugI("*** Found %d OneWire sensor(s) ***", numSensors);
-
   DallasTemperatureSensors* dts = new DallasTemperatureSensors(pin);
 
-  OneWireTemperature **tempSensor = (OneWireTemperature**)malloc(numSensors);
-  SKOutputFloat **tempSensorSKOutput = (SKOutputFloat**)malloc(numSensors);
-  Linear **tempSensorCalibration = (Linear**)malloc(numSensors);
-
   for (int i = 0; i < numSensors; i++) {
-    tempSensor[i] = new OneWireTemperature(dts, read_delay, String("/tempSensor") + String(i) + String("/oneWire"));
-    ConfigItem(tempSensor[i])
-      ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" address"))
-      ->set_sort_order(100+10*i);
-
-    tempSensorCalibration[i] =
-        new Linear(1.0, 0.0, String("/tempSensor") + String(i) + String("/linear"));
-    ConfigItem(tempSensorCalibration[i])
-        ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" calibration"))
-        ->set_sort_order(100+10*i+1);
-
-    tempSensorSKOutput[i] = new SKOutputFloat(
-          String("environment.temperature") + String(i), String("/tempSensor") + String(i) + String("/skPath"));
-    ConfigItem(tempSensorSKOutput[i])
-          ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" Signal K Path"))
-          ->set_sort_order(100+10*i+2);
-
-      tempSensor[i]->connect_to(tempSensorCalibration[i])
-                  ->connect_to(tempSensorSKOutput[i]);
-
-    debugI("*** Initialized OneWire sensor %d ***", i);
-    }
+    registerDS1820(dts, read_delay, i);
   }
+}
 
 // main program loop
 void loop() {
