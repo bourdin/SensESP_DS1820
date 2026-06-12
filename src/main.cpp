@@ -1,153 +1,350 @@
-
-#include <memory>
-
 #include "sensesp/signalk/signalk_output.h"
 #include "sensesp/transforms/linear.h"
 #include "sensesp/ui/config_item.h"
-#include "sensesp/sensors/digital_input.h"
-#include "sensesp/transforms/frequency.h"
-#include "sensesp_onewire/onewire_temperature.h"
 #include "sensesp_app_builder.h"
-#include "OneWireNg_CurrentPlatform.h"
-#include <Adafruit_BMP280.h>
+#include "sensesp/sensors/sensor.h"
+#include "sensesp/transforms/lambda_transform.h"
 
-using namespace reactesp;
+#include <sensesp/system/observablevalue.h>
+
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP3XX.h>
+#include <Adafruit_INA3221.h>
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
 using namespace sensesp;
-using namespace sensesp::onewire;
 
-void registerBMP280(int sda, int scl, uint read_delay) {
-  debugI("*** Initializing BMP280 sensor ***");
-  Adafruit_BMP280 bmp280;
+Adafruit_BMP3XX BMP388;
+Adafruit_INA3221 INA;
 
-  Wire.setPins(sda, scl);
-  Wire.begin();
-  bool status = bmp280.begin();
-  if (!status) {
-    debugI("*** Could not find BMP280 sensor ***");
+float voltageToCharge(float voltage){
+  float charge;
+  if (voltage <= 12) {
+    charge = 0.0f;
+  } else if (voltage < 12.4) {
+    charge = (voltage - 12) * 50.0f / 0.4f / 100.0f;
+  } else if (voltage < 12.8) {
+    charge = 0.5f + (voltage - 12.4) * 50.0f / 0.4f / 100.0f;
+  } else {
+    charge = 1.0f;
+  }
+  return charge;
+}
+
+void BMPDebug() {
+  if (! BMP388.performReading()) {
+    debugI("Failed to perform reading :(");
     return;
   }
-  debugI("*** Configuring BMP280 sensor ***");
+  debugI("Temperature = %f C",BMP388.temperature);
 
-  auto *BMP280Sensor = new RepeatSensor<float>(read_delay, [&bmp280]() {
-    return (bmp280.readTemperature() + 273.15); });
+  debugI("Pressure = %f hPa", BMP388.pressure / 100.0);
+  debugI("Pressure = %f hPa", BMP388.readPressure() / 100.0);
 
-  auto BMP280SKOutput = new SKOutput<float>(
-      "environment.enginecompartment.temperature",
-      "/sensors/enginecompartmenttemperature/sk",
-      new SKMetadata("K", "temperature")
-  );
-  ConfigItem(BMP280SKOutput)
-      ->set_title("Engine compartment temperature Signal K Path")
-      ->set_sort_order(302);
-
-  BMP280Sensor
-      ->connect_to(BMP280SKOutput);
+  debugI();
 }
 
-void registerRPM(int pin, uint read_delay) {
-  debugI("*** Initializing RPM sensor ***");
-  auto *RPMSensor = new DigitalInputCounter(pin, INPUT_PULLUP, RISING, read_delay);
+void INADebug() {
+  // INA.setShuntResistance(0,0.05f);
+  INA.setShuntResistance(0, 0.025f);
+  for (int i = 0 ; i < 1; i++){
+    debugI("Shunt %d:  bus voltage %f  V / shunt voltage %e  mV / current %e",
+      i, INA.getBusVoltage(i), INA.getShuntVoltage(i)*1000.0, INA.getCurrentAmps(i)*1000.0);
+  }
+}
 
-  auto RPMFrequency = new Frequency(1., "/RPMSensor/calibrate");
-  ConfigItem(RPMFrequency)
-      ->set_title("RPM sensor frequency multiplier")
-      ->set_sort_order(201);
+void registerBMP388(uint read_delay) {
+  debugI("*** Configuring BMP388 sensor ***");
 
-  auto RPMSensorSKOutput = new SKOutputFloat(
-      "propulsion.main.revolutions",
-      "/sensors/engine_rpm/sk",
-      new SKMetadata("Hz", "engine revolution")
+  BMP388.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  BMP388.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  BMP388.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  BMP388.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  // Temperature sensor
+  auto *BMP388SensorT = new RepeatSensor<float>(read_delay, [&BMP388]() {
+    return (BMP388.readTemperature() + 273.15); });
+
+  auto BMP388SKOutputT = new SKOutput<float>(
+      "sensors.bmp388.temperature",
+      "/sensors/bmp388/temperature/sk",
+      new SKMetadata("K", "BMP388 temperature (K)")
   );
-  ConfigItem(RPMSensorSKOutput)
-      ->set_title("RPM sensor frequency multiplier Signal K Path")
+  ConfigItem(BMP388SKOutputT)
+      ->set_title("BMP388 Temperature Signal K Path")
+      ->set_sort_order(100);
+
+  BMP388SensorT
+      ->connect_to(BMP388SKOutputT);
+
+  // Pressure sensor
+  auto *BMP388SensorP = new RepeatSensor<float>(read_delay, [&BMP388]() {
+    return (BMP388.readPressure()); });
+
+  auto BMP388SKOutputP = new SKOutput<float>(
+      "sensors.bmp388.pressure",
+      "/sensors/bmp388/pressure/sk",
+      new SKMetadata("Pa", "BMP388 pressure (Pa)")
+  );
+  ConfigItem(BMP388SKOutputP)
+      ->set_title("BMP388 Pressure Signal K Path")
+      ->set_sort_order(101);
+
+  BMP388SensorP
+      ->connect_to(BMP388SKOutputP);
+}
+
+void registerINA3221(uint read_delay) {
+  debugI("*** registering INA 3221");
+
+  //// SHUNT 0 ////
+  // Voltage measurement
+  auto *shunt0Voltage = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getBusVoltage(0)); });
+  auto shunt0VoltageSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt0.voltage",
+    "/electrical/batteries/shunt0/voltage/sk",
+    new SKMetadata("V", "shunt 0 voltage (V)")
+  );
+  ConfigItem(shunt0VoltageSKOutput)
+      ->set_title("Shunt 0 voltage SK path")
+      ->set_sort_order(200);
+  shunt0Voltage->connect_to(shunt0VoltageSKOutput);
+
+  // Current measurement
+  auto *shunt0Current = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getShuntVoltage(0)); });
+
+  // The mouser shunts I have have a resistance of 0.0005 Ohm
+  auto* shunt0Resistance = new PersistingObservableValue<float>(
+    0.05f*0.0005f/(0.05f+0.0005f),
+    "/electrical/batteries/shunt0/resistance");
+  ConfigItem(shunt0Resistance)
+    ->set_title("Shunt 0 resistance (Ohm)")
+    ->set_description("Shunt resistor value in Ohms (e.g. 0.05)")
+    ->set_requires_restart(true)
+    ->set_sort_order(201);
+
+  auto* divide_transform0 = new LambdaTransform<float, float>(
+    [shunt0Resistance](float input) -> float {
+      float r = shunt0Resistance->get();
+      if (r == 0.0f) return 0.0f;
+      // debugI("input=%e  divisor=%e output=%e", input, r, input / r);
+      return input / r;
+    }
+  );
+
+  auto shunt0CurrentSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt0.current",
+    "/electrical/batteries/shunt0/current/sk",
+    new SKMetadata("A", "shunt0  current (A)")
+  );
+  ConfigItem(shunt0CurrentSKOutput)
+      ->set_title("Shunt 0 current SK path")
       ->set_sort_order(202);
 
-  RPMSensor
-     ->connect_to(RPMFrequency)
-      ->connect_to(RPMSensorSKOutput);
-  debugI("*** Initialized RPM sensor ***");
-}
+  shunt0Current
+      ->connect_to(divide_transform0)
+      ->connect_to(shunt0CurrentSKOutput);
 
-void registerDS1820(DallasTemperatureSensors *dts, uint read_delay, int i){
-  debugI("*** Initializing OneWire sensor %d ***", i);
-  auto tempSensor = new OneWireTemperature(dts, read_delay, String("/sensors/temperature") + String(i) + String("/oneWire"));
-  ConfigItem(tempSensor)
-      ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" address"))
-      ->set_sort_order(100+10*i);
+  // Charge estimate:
+  auto *shunt0Charge = new RepeatSensor<float>(read_delay, [&INA]() {
+    float voltage = INA.getBusVoltage(0);
 
-  auto tempSensorCalibration =
-      new Linear(1.0, 0.0, String("/sensors/temperature") + String(i) + String("/linear"));
-  ConfigItem(tempSensorCalibration)
-      ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" calibration"))
-      ->set_sort_order(100+10*i+1);
-
-  auto tempSensorSKOutput = new SKOutputFloat(
-      String("environment.temperature") + String(i),
-      String("/sensors/temperature") + String(i) + String("/sk"),
-      new SKMetadata("K", "temperature")
+    return voltageToCharge(voltage);
+  });
+  auto shunt0ChargeSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt0.capacity.stateOfCharge",
+    "/electrical/batteries/shunt0/capacity/stateOfCharge/sk",
+    new SKMetadata("ratio", "shunt 0 state of charge (ratio)")
   );
-  ConfigItem(tempSensorSKOutput)
-      ->set_title(String("DS1820 temperature sensor ") + String(i) + String(" Signal K Path"))
-      ->set_sort_order(100+10*i+2);
+  ConfigItem(shunt0ChargeSKOutput)
+      ->set_title("Shunt 0 state of charge SK path")
+      ->set_sort_order(203);
+  shunt0Charge
+      ->connect_to(shunt0ChargeSKOutput);
 
-  tempSensor
-      ->connect_to(tempSensorCalibration)
-      ->connect_to(tempSensorSKOutput);
-  debugI("*** Initialized OneWire sensor %d ***", i);
+  //// SHUNT 1 ////
+  // Voltage measurement
+  auto *shunt1Voltage = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getBusVoltage(1)); });
+  auto shunt1VoltageSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt1.voltage",
+    "/electrical/batteries/shunt1/voltage/sk",
+    new SKMetadata("V", "shunt 1 voltage (V)")
+  );
+  ConfigItem(shunt1VoltageSKOutput)
+      ->set_title("Shunt 1 voltage SK path")
+      ->set_sort_order(300);
+  shunt1Voltage->connect_to(shunt1VoltageSKOutput);
+
+  // Current measurement
+  auto *shunt1Current = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getShuntVoltage(1)); });
+
+  // The mouser shunts I have have a resistance of 0.0005 Ohm
+  auto* shunt1Resistance = new PersistingObservableValue<float>(
+    0.05f*0.0005f/(0.05f+0.0005f),
+    "/electrical/batteries/shunt1/resistance");
+  ConfigItem(shunt1Resistance)
+    ->set_title("Shunt 1 resistance (Ohm)")
+    ->set_description("Shunt resistor value in Ohms (e.g. 0.05)")
+    ->set_requires_restart(true)
+    ->set_sort_order(301);
+
+  auto* divide_transform1 = new LambdaTransform<float, float>(
+    [shunt1Resistance](float input) -> float {
+      float r = shunt1Resistance->get();
+      if (r == 0.0f) return 0.0f;
+      // debugI("input=%e  divisor=%e output=%e", input, r, input / r);
+      return input / r;
+    }
+  );
+
+  auto shunt1CurrentSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt1.current",
+    "/electrical/batteries/shunt1/current/sk",
+    new SKMetadata("A", "shunt1  current (A)")
+  );
+  ConfigItem(shunt1CurrentSKOutput)
+      ->set_title("Shunt 1 current SK path")
+      ->set_sort_order(302);
+
+  shunt1Current
+      ->connect_to(divide_transform1)
+      ->connect_to(shunt1CurrentSKOutput);
+
+  // Charge estimate:
+  auto *shunt1Charge = new RepeatSensor<float>(read_delay, [&INA]() {
+    float voltage = INA.getBusVoltage(1);
+
+    return voltageToCharge(voltage);
+  });
+  auto shunt1ChargeSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt1.capacity.stateOfCharge",
+    "/electrical/batteries/shunt1/capacity/stateOfCharge/sk",
+    new SKMetadata("ratio", "shunt 1 state of charge (ratio)")
+  );
+  ConfigItem(shunt1ChargeSKOutput)
+      ->set_title("Shunt 1 state of charge SK path")
+      ->set_sort_order(303);
+  shunt1Charge
+      ->connect_to(shunt1ChargeSKOutput);
+
+  //// SHUNT 2 ////
+  // Voltage measurement
+  auto *shunt2Voltage = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getBusVoltage(2)); });
+  auto shunt2VoltageSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt2.voltage",
+    "/electrical/batteries/shunt2/voltage/sk",
+    new SKMetadata("V", "shunt 2 voltage (V)")
+  );
+  ConfigItem(shunt2VoltageSKOutput)
+      ->set_title("Shunt 2 voltage SK path")
+      ->set_sort_order(400);
+  shunt2Voltage->connect_to(shunt2VoltageSKOutput);
+
+  // Current measurement
+  auto *shunt2Current = new RepeatSensor<float>(read_delay, [&INA]() {
+    return (INA.getShuntVoltage(2)); });
+
+  // The mouser shunts I have have a resistance of 0.0005 Ohm
+  auto* shunt2Resistance = new PersistingObservableValue<float>(
+    0.05f*0.0005f/(0.05f+0.0005f),
+    "/electrical/batteries/shunt2/resistance");
+  ConfigItem(shunt2Resistance)
+    ->set_title("Shunt 2 resistance (Ohm)")
+    ->set_description("Shunt resistor value in Ohms (e.g. 0.05)")
+    ->set_requires_restart(true)
+    ->set_sort_order(401);
+
+  auto* divide_transform2 = new LambdaTransform<float, float>(
+    [shunt2Resistance](float input) -> float {
+      float r = shunt2Resistance->get();
+      if (r == 0.0f) return 0.0f;
+      // debugI("input=%e  divisor=%e output=%e", input, r, input / r);
+      return input / r;
+    }
+  );
+
+  auto shunt2CurrentSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt2.current",
+    "/electrical/batteries/shunt2/current/sk",
+    new SKMetadata("A", "shunt2  current (A)")
+  );
+  ConfigItem(shunt2CurrentSKOutput)
+      ->set_title("Shunt 2 current SK path")
+      ->set_sort_order(402);
+
+  shunt2Current
+      ->connect_to(divide_transform2)
+      ->connect_to(shunt2CurrentSKOutput);
+
+  // Charge estimate:
+  auto *shunt2Charge = new RepeatSensor<float>(read_delay, [&INA]() {
+    float voltage = INA.getBusVoltage(2);
+
+    return voltageToCharge(voltage);
+  });
+  auto shunt2ChargeSKOutput = new SKOutputFloat(
+    "electrical.batteries.shunt2.capacity.stateOfCharge",
+    "/electrical/batteries/shunt2/capacity/stateOfCharge/sk",
+    new SKMetadata("ratio", "shunt 2 state of charge (ratio)")
+  );
+  ConfigItem(shunt2ChargeSKOutput)
+      ->set_title("Shunt 2 state of charge SK path")
+      ->set_sort_order(403);
+  shunt2Charge
+      ->connect_to(shunt2ChargeSKOutput);
 }
+
 
 void setup() {
+#ifndef SERIAL_DEBUG_DISABLED
+  SetupSerialDebug(9600);
+#endif
+
   SetupLogging();
 
   // Create the global SensESPApp() object.
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
-                      // Set a custom hostname for the app.
-                    ->set_hostname("1Wire")
-                    // Optionally, hard-code the WiFi and Signal K server
-                    // settings. This is normally not needed.
+                    ->set_hostname("BatteryMonitor")
+                    ->enable_ota("")
+                    ->enable_system_info_sensors("sensors.batterymonitor")
                     ->get_app();
-
-  /*
-     Tell SensESP where the sensor is connected to the board
-     ESP32 pins are specified as just the X in GPIOX
-  */
-  uint8_t OWpin = 19;
-  pinMode(OWpin, INPUT_PULLUP);
 
   // Define how often SensESP should read the sensor(s) in milliseconds
   uint read_delay = 10000;
+  int scl = 18;
+  int sda = 17;
+  bool status;
+  Wire.begin(scl, sda);
 
-  // Count available sensors
-  int numSensors = 0;
-  OneWireNg* onewire_ = new OneWireNg_CurrentPlatform(OWpin, false);
-  for (const auto& addr : *onewire_) {
-    numSensors++;
-  }
-  debugI("*** Found %d OneWire sensor(s) ***", numSensors);
-
-  // Create the main Dallas temperature sensor
-  DallasTemperatureSensors* dts = new DallasTemperatureSensors(OWpin);
-
-  // Register initial onewire senors
-  for (int i = 0; i < numSensors; i++) {
-    registerDS1820(dts, read_delay, i);
+  status = BMP388.begin_I2C();
+  if (!status) {
+    debugI("*** Could not find BMP388 sensor ***");
+  } else {
+    registerBMP388(read_delay);
   }
 
-  // Create the RPM counter
-  uint8_t RPMpin = 21;
-  read_delay = 1000;
-  registerRPM(RPMpin, read_delay);
-
-  // read_delay = 5000;
-  // int scl = 1;
-  // int sda = 2;
-  // pinMode(OWpin, INPUT_PULLUP);
-  // registerBMP280(sda, scl, read_delay);
+  status = INA.begin(0x40, &Wire);
+  if (!status) {
+    debugI("*** Could not find INA3221 sensor ***");
+  } else {
+    INA.setAveragingMode(INA3221_AVG_16_SAMPLES);
+    registerINA3221(read_delay);
+  }
 }
 
 // main program loop
 void loop() {
   static auto event_loop = sensesp_app->get_event_loop();
   event_loop->tick();
+  // BMPDebug();
+  // INADebug();
+  // delay(5000);
 }
