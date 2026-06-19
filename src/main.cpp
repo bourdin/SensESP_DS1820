@@ -309,13 +309,24 @@ void setup() {
 
   SetupLogging();
 
-  // Create the global SensESPApp() object.
+  // Create the global SensESPApp() object. Wi-Fi credentials and the OTA
+  // password come from secrets.txt at build time (see load_secrets.py); when
+  // absent, Wi-Fi falls back to the captive-portal config and OTA stays off.
   SensESPAppBuilder builder;
-  sensesp_app = (&builder)
-                    ->set_hostname("BatteryMonitor")
-                    ->enable_ota("")
-                    ->enable_system_info_sensors("sensors.batterymonitor")
-                    ->get_app();
+  auto *b = (&builder)->set_hostname("BatteryMonitor");
+
+#ifdef WIFI_SSID
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD ""
+#endif
+  b = b->set_wifi_client(WIFI_SSID, WIFI_PASSWORD);
+#endif
+
+#ifdef OTA_PASSWORD
+  b = b->enable_ota(OTA_PASSWORD);
+#endif
+
+  sensesp_app = b->enable_system_info_sensors("sensors.batterymonitor")->get_app();
 
   // Define how often SensESP should read the sensor(s) in milliseconds
   uint read_delay = 10000;
